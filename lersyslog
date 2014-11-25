@@ -1,0 +1,1652 @@
+#!/usr/bin/env python2
+# coding: utf-8
+
+# ------------------ Main import section -------------------
+# Mandatory modules go here.
+import ConfigParser
+import getopt
+import getpass
+import hashlib
+import httplib
+import logging
+import os
+import platform
+import socket
+import subprocess
+import sys
+import re
+import errno
+import urllib
+
+# ------------------- Constants section --------------------
+# Application version
+import collections
+
+LE_LERSYSLOG_NAME = 'lersyslog'
+# This value should be replaced by version generator
+LE_LERSYSLOG_VERSION = '1.0.9'
+
+# Process exit codes
+EXIT_OK = 0
+EXIT_ERR = 1
+
+# HTTP result codes
+HTTP_OK = 200
+HTTP_FORBIDDEN = 403
+
+# Logger ID
+LOG_LE_RSYSLOG = 'logentries.com'
+
+# GUID regexp
+LE_GUID_REGEXP = re.compile(
+    '[0-9a-f]{8}\-[0-9a-f]{4}\-[0-9a-f]{4}\-[0-9a-f]{4}\-[0-9a-f]{12}', re.IGNORECASE)
+LE_EMAIL_REGEXP = re.compile(
+    '[0-9a-z#\{\}\[\]\.\{\}\&\!\^\'\`%\\+\-\|\~]+\@[0-9a-z\-]+\.[a-z]+', re.IGNORECASE)
+
+# Paths
+LE_LERSYSLOG_CONFIG_PATH = '/etc/logentries/rsyslog'
+LE_LERSYSLOG_CONFIG_NAME = 'lersyslog.conf'
+LE_LERSYSLOG_CERT_NAME = 'ca-certs.pem'
+LE_RSYSLOG_CONFIG_FILE = LE_LERSYSLOG_CONFIG_PATH + \
+    '/' + LE_LERSYSLOG_CONFIG_NAME
+RSYSLOG_CONF_FILE = '/etc/rsyslog.conf'
+
+# Config sections and key names
+CONF_MAIN_SECTION = 'Main'
+CONF_HOST_KEY_PARAM = 'host-key'
+CONF_ACOUNT_KEY_PARAM = 'account-key'
+
+# Misc.
+# Release information on LSB systems
+LSB_RELEASE = '/etc/lsb-release'
+
+# -------------------- Messages section --------------------
+LOGGER_OBTAINING_ERROR = 'Cannot open log output'
+APP_INTERRUPTED_MSG = '\nShutting down.'
+
+USAGE_HELP_MESSAGE = """Logentries """ + LE_LERSYSLOG_NAME + """ version """ + str(LE_LERSYSLOG_VERSION) + """
+Usage: lersyslog COMMAND [ARGS]
+
+Where command is one of:
+    register                           Register this host
+    follow {file1, file2, ... ,fileN}  Follow given files
+    help                               Show this message and exit
+
+Where parameters are:
+    --version          Show version number
+    --host-key=        Set host key and exit
+    --account-key=     Set account key and exit
+    --use-ca-provided  Use internal bundled certificate
+    --force            Force given operation
+    --debug            Switch on debug messages
+"""
+
+PRIVILEGES_ERROR = LE_LERSYSLOG_NAME + ' must be invoked with elevated privileges. Please use command ' + \
+    '"sudo ./' + LE_LERSYSLOG_NAME + '"'
+ACCOUNT_KEY_FORMAT_ERROR = 'Given account key does not look right.'
+HOST_KEY_FORMAT_ERROR = 'Config check: given host key does not look right.'
+KEYS_FORMAT_HELP = ' Key must be a valid GUID given in such form: XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXX ,' + \
+                   ' where X - a hexadecimal digit (0-9, a-f, A-F)'
+UNKNOWN_PARAMETER_ERROR = 'Unknown parameter: '
+CONFIG_PATH_CREATION_ERROR = 'Error while trying to create config dir (' + \
+    LE_LERSYSLOG_CONFIG_PATH + '): '
+CONFIG_FILE_OPEN_ERROR = 'Error while creating/opening config file (' + \
+    LE_RSYSLOG_CONFIG_FILE + '): '
+CONFIG_FILE_WRITE_ERROR = 'I/O error while saving config file (' + \
+    LE_RSYSLOG_CONFIG_FILE + '): '
+CONFIG_FILE_READ_ERROR = 'I/O error while loading config file (' + \
+    LE_RSYSLOG_CONFIG_FILE + '): '
+
+MALFORMED_KEY_FROM_CONFIG = 'It seems that value of \'%s\' parameter in ' + LE_RSYSLOG_CONFIG_FILE + ' file is ' + \
+                            'malformed and cannot be used. Please run registration (./' + LE_LERSYSLOG_NAME + \
+                            ' register --account-key=... --host-key=... ) ' +\
+                            'to reset %s value and supply both account and host keys from command line via ' + \
+                            '--account-key and --host-key parameters.'
+
+# -------------------- Dialog messages ---------------------
+CREDENTIALS_DLG_HEADER = 'Please provide credentials that you have used\nduring registration on' + \
+                         ' Logentries service or hit ^C to quit.'
+EMAIL_INPUT_MSG = 'E-Mail: '
+PASSWORD_INPUT_MSG = 'Password: '
+
+NO_ASSOC_ACCOUNTS = 'No accounts are associated with given credentials.'
+
+ACCOUNT_CHOICE_DLG = 'Please, choose the account from the list:'
+ACCOUNT_CHOICE_MSG = '\nChoose account by entering it\'s number in the list or press ^C to quit.\n' + \
+    'Your choice is: '
+
+CREDENTIALS_INPUT_EMPTY_ERROR = 'E-mail or password is empty'
+CERT_ERROR = 'Error: Cannot find suitable CA certificate.'
+ERROR_ALREADY_REGISTERED = 'This host is already registered (host key in the config is %s). Use --force to override current registration.'
+ERROR_NOT_REGISTERED = 'You have currently not registered this tool to your account. Please run' + \
+                       ' \'sudo lersyslog register\' or alternative \'sudo lersyslog register --account-key=...' + \
+                       ' --host-key=...\' before attempting to follow a file.'
+
+# ----------------------- SSL certificate ------------------
+authority_certificate = """-----BEGIN CERTIFICATE-----
+MIIDIDCCAomgAwIBAgIENd70zzANBgkqhkiG9w0BAQUFADBOMQswCQYDVQQGEwJV
+UzEQMA4GA1UEChMHRXF1aWZheDEtMCsGA1UECxMkRXF1aWZheCBTZWN1cmUgQ2Vy
+dGlmaWNhdGUgQXV0aG9yaXR5MB4XDTk4MDgyMjE2NDE1MVoXDTE4MDgyMjE2NDE1
+MVowTjELMAkGA1UEBhMCVVMxEDAOBgNVBAoTB0VxdWlmYXgxLTArBgNVBAsTJEVx
+dWlmYXggU2VjdXJlIENlcnRpZmljYXRlIEF1dGhvcml0eTCBnzANBgkqhkiG9w0B
+AQEFAAOBjQAwgYkCgYEAwV2xWGcIYu6gmi0fCG2RFGiYCh7+2gRvE4RiIcPRfM6f
+BeC4AfBONOziipUEZKzxa1NfBbPLZ4C/QgKO/t0BCezhABRP/PvwDN1Dulsr4R+A
+cJkVV5MW8Q+XarfCaCMczE1ZMKxRHjuvK9buY0V7xdlfUNLjUA86iOe/FP3gx7kC
+AwEAAaOCAQkwggEFMHAGA1UdHwRpMGcwZaBjoGGkXzBdMQswCQYDVQQGEwJVUzEQ
+MA4GA1UEChMHRXF1aWZheDEtMCsGA1UECxMkRXF1aWZheCBTZWN1cmUgQ2VydGlm
+aWNhdGUgQXV0aG9yaXR5MQ0wCwYDVQQDEwRDUkwxMBoGA1UdEAQTMBGBDzIwMTgw
+ODIyMTY0MTUxWjALBgNVHQ8EBAMCAQYwHwYDVR0jBBgwFoAUSOZo+SvSspXXR9gj
+IBBPM5iQn9QwHQYDVR0OBBYEFEjmaPkr0rKV10fYIyAQTzOYkJ/UMAwGA1UdEwQF
+MAMBAf8wGgYJKoZIhvZ9B0EABA0wCxsFVjMuMGMDAgbAMA0GCSqGSIb3DQEBBQUA
+A4GBAFjOKer89961zgK5F7WF0bnj4JXMJTENAKaSbn+2kmOeUJXRmm/kEd5jhW6Y
+7qj/WsjTVbJmcVfewCHrPSqnI0kBBIZCe/zuf6IWUrVnZ9NA2zsmWLIodz2uFHdh
+1voqZiegDfqnc1zqcPGUIWVEX/r87yloqaKHee9570+sB3c4
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDVDCCAjygAwIBAgIDAjRWMA0GCSqGSIb3DQEBBQUAMEIxCzAJBgNVBAYTAlVT
+MRYwFAYDVQQKEw1HZW9UcnVzdCBJbmMuMRswGQYDVQQDExJHZW9UcnVzdCBHbG9i
+YWwgQ0EwHhcNMDIwNTIxMDQwMDAwWhcNMjIwNTIxMDQwMDAwWjBCMQswCQYDVQQG
+EwJVUzEWMBQGA1UEChMNR2VvVHJ1c3QgSW5jLjEbMBkGA1UEAxMSR2VvVHJ1c3Qg
+R2xvYmFsIENBMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2swYYzD9
+9BcjGlZ+W988bDjkcbd4kdS8odhM+KhDtgPpTSEHCIjaWC9mOSm9BXiLnTjoBbdq
+fnGk5sRgprDvgOSJKA+eJdbtg/OtppHHmMlCGDUUna2YRpIuT8rxh0PBFpVXLVDv
+iS2Aelet8u5fa9IAjbkU+BQVNdnARqN7csiRv8lVK83Qlz6cJmTM386DGXHKTubU
+1XupGc1V3sjs0l44U+VcT4wt/lAjNvxm5suOpDkZALeVAjmRCw7+OC7RHQWa9k0+
+bw8HHa8sHo9gOeL6NlMTOdReJivbPagUvTLrGAMoUgRx5aszPeE4uwc2hGKceeoW
+MPRfwCvocWvk+QIDAQABo1MwUTAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBTA
+ephojYn7qwVkDBF9qn1luMrMTjAfBgNVHSMEGDAWgBTAephojYn7qwVkDBF9qn1l
+uMrMTjANBgkqhkiG9w0BAQUFAAOCAQEANeMpauUvXVSOKVCUn5kaFOSPeCpilKIn
+Z57QzxpeR+nBsqTP3UEaBU6bS+5Kb1VSsyShNwrrZHYqLizz/Tt1kL/6cdjHPTfS
+tQWVYrmm3ok9Nns4d0iXrKYgjy6myQzCsplFAMfOEVEiIuCl6rYVSAlk6l5PdPcF
+PseKUgzbFbS9bZvlxrFUaKnjaZC2mqUPuLk/IH2uSrW4nOQdtqvmlKXBx4Ot2/Un
+hw4EbNX/3aBd7YdStysVAq45pmp06drE57xNNB6pXE0zX5IJL4hmXXeXxx12E6nV
+5fEWCRE11azbJHFwLJhWC9kXtNHjUStedejV0NxPNO3CBWaAocvmMw==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIID2TCCAsGgAwIBAgIDAjbQMA0GCSqGSIb3DQEBBQUAMEIxCzAJBgNVBAYTAlVT
+MRYwFAYDVQQKEw1HZW9UcnVzdCBJbmMuMRswGQYDVQQDExJHZW9UcnVzdCBHbG9i
+YWwgQ0EwHhcNMTAwMjE5MjIzOTI2WhcNMjAwMjE4MjIzOTI2WjBAMQswCQYDVQQG
+EwJVUzEXMBUGA1UEChMOR2VvVHJ1c3QsIEluYy4xGDAWBgNVBAMTD0dlb1RydXN0
+IFNTTCBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAJCzgMHk5Uat
+cGA9uuUU3Z6KXot1WubKbUGlI+g5hSZ6p1V3mkihkn46HhrxJ6ujTDnMyz1Hr4Gu
+FmpcN+9FQf37mpc8oEOdxt8XIdGKolbCA0mEEoE+yQpUYGa5jFTk+eb5lPHgX3UR
+8im55IaisYmtph6DKWOy8FQchQt65+EuDa+kvc3nsVrXjAVaDktzKIt1XTTYdwvh
+dGLicTBi2LyKBeUxY0pUiWozeKdOVSQdl+8a5BLGDzAYtDRN4dgjOyFbLTAZJQ50
+96QhS6CkIMlszZhWwPKoXz4mdaAN+DaIiixafWcwqQ/RmXAueOFRJq9VeiS+jDkN
+d53eAsMMvR8CAwEAAaOB2TCB1jAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFEJ5
+VBthzVUrPmPVPEhX9Z/7Rc5KMB8GA1UdIwQYMBaAFMB6mGiNifurBWQMEX2qfWW4
+ysxOMBIGA1UdEwEB/wQIMAYBAf8CAQAwOgYDVR0fBDMwMTAvoC2gK4YpaHR0cDov
+L2NybC5nZW90cnVzdC5jb20vY3Jscy9ndGdsb2JhbC5jcmwwNAYIKwYBBQUHAQEE
+KDAmMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5nZW90cnVzdC5jb20wDQYJKoZI
+hvcNAQEFBQADggEBANTvU4ToGr2hiwTAqfVfoRB4RV2yV2pOJMtlTjGXkZrUJPji
+J2ZwMZzBYlQG55cdOprApClICq8kx6jEmlTBfEx4TCtoLF0XplR4TEbigMMfOHES
+0tdT41SFULgCy+5jOvhWiU1Vuy7AyBh3hjELC3DwfjWDpCoTZFZnNF0WX3OsewYk
+2k9QbSqr0E1TQcKOu3EDSSmGGM8hQkx0YlEVxW+o78Qn5Rsz3VqI138S0adhJR/V
+4NwdzxoQ2KDLX4z6DOW/cf/lXUQdpj6HR/oaToODEj+IZpWYeZqF6wJHzSXj8gYE
+TpnKXKBuervdo5AaRTPvvz7SBMS24CqFZUE+ENQ=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDfTCCAuagAwIBAgIDErvmMA0GCSqGSIb3DQEBBQUAME4xCzAJBgNVBAYTAlVT
+MRAwDgYDVQQKEwdFcXVpZmF4MS0wKwYDVQQLEyRFcXVpZmF4IFNlY3VyZSBDZXJ0
+aWZpY2F0ZSBBdXRob3JpdHkwHhcNMDIwNTIxMDQwMDAwWhcNMTgwODIxMDQwMDAw
+WjBCMQswCQYDVQQGEwJVUzEWMBQGA1UEChMNR2VvVHJ1c3QgSW5jLjEbMBkGA1UE
+AxMSR2VvVHJ1c3QgR2xvYmFsIENBMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB
+CgKCAQEA2swYYzD99BcjGlZ+W988bDjkcbd4kdS8odhM+KhDtgPpTSEHCIjaWC9m
+OSm9BXiLnTjoBbdqfnGk5sRgprDvgOSJKA+eJdbtg/OtppHHmMlCGDUUna2YRpIu
+T8rxh0PBFpVXLVDviS2Aelet8u5fa9IAjbkU+BQVNdnARqN7csiRv8lVK83Qlz6c
+JmTM386DGXHKTubU1XupGc1V3sjs0l44U+VcT4wt/lAjNvxm5suOpDkZALeVAjmR
+Cw7+OC7RHQWa9k0+bw8HHa8sHo9gOeL6NlMTOdReJivbPagUvTLrGAMoUgRx5asz
+PeE4uwc2hGKceeoWMPRfwCvocWvk+QIDAQABo4HwMIHtMB8GA1UdIwQYMBaAFEjm
+aPkr0rKV10fYIyAQTzOYkJ/UMB0GA1UdDgQWBBTAephojYn7qwVkDBF9qn1luMrM
+TjAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjA6BgNVHR8EMzAxMC+g
+LaArhilodHRwOi8vY3JsLmdlb3RydXN0LmNvbS9jcmxzL3NlY3VyZWNhLmNybDBO
+BgNVHSAERzBFMEMGBFUdIAAwOzA5BggrBgEFBQcCARYtaHR0cHM6Ly93d3cuZ2Vv
+dHJ1c3QuY29tL3Jlc291cmNlcy9yZXBvc2l0b3J5MA0GCSqGSIb3DQEBBQUAA4GB
+AHbhEm5OSxYShjAGsoEIz/AIx8dxfmbuwu3UOx//8PDITtZDOLC5MH0Y0FWDomrL
+NhGc6Ehmo21/uBPUR/6LWlxz/K7ZGzIZOKuXNBSqltLroxwUCEm2u+WR74M26x1W
+b8ravHNjkOR/ez4iyz0H7V84dJzjA1BOoa+Y7mHyhD8S
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIFSjCCBDKgAwIBAgIDBQMSMA0GCSqGSIb3DQEBBQUAMGExCzAJBgNVBAYTAlVT
+MRYwFAYDVQQKEw1HZW9UcnVzdCBJbmMuMR0wGwYDVQQLExREb21haW4gVmFsaWRh
+dGVkIFNTTDEbMBkGA1UEAxMSR2VvVHJ1c3QgRFYgU1NMIENBMB4XDTEyMDkxMDE5
+NTI1N1oXDTE2MDkxMTIxMjgyOFowgcExKTAnBgNVBAUTIEpxd2ViV3RxdzZNblVM
+ek1pSzNiL21hdktiWjd4bEdjMRMwEQYDVQQLEwpHVDAzOTM4NjcwMTEwLwYDVQQL
+EyhTZWUgd3d3Lmdlb3RydXN0LmNvbS9yZXNvdXJjZXMvY3BzIChjKTEyMS8wLQYD
+VQQLEyZEb21haW4gQ29udHJvbCBWYWxpZGF0ZWQgLSBRdWlja1NTTChSKTEbMBkG
+A1UEAxMSYXBpLmxvZ2VudHJpZXMuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A
+MIIBCgKCAQEAxcmFqgE2p6+N9lM2GJhe8bNUO0qmcw8oHUVrsneeVA66hj+qKPoJ
+AhGKxC0K9JFMyIzgPu6FvuVLahFZwv2wkbjXKZLIOAC4o6tuVb4oOOUBrmpvzGtL
+kKVN+sip1U7tlInGjtCfTMWNiwC4G9+GvJ7xORgDpaAZJUmK+4pAfG8j6raWgPGl
+JXo2hRtOUwmBBkCPqCZQ1mRETDT6tBuSAoLE1UMlxWvMtXCUzeV78H+2YrIDxn/W
+xd+eEvGTSXRb/Q2YQBMqv8QpAlarcda3WMWj8pkS38awyBM47GddwVYBn5ZLEu/P
+DiRQGSmLQyFuk5GUdApSyFETPL6p9MfV4wIDAQABo4IBqDCCAaQwHwYDVR0jBBgw
+FoAUjPTZkwpHvACgSs5LdW6gtrCyfvwwDgYDVR0PAQH/BAQDAgWgMB0GA1UdJQQW
+MBQGCCsGAQUFBwMBBggrBgEFBQcDAjAdBgNVHREEFjAUghJhcGkubG9nZW50cmll
+cy5jb20wQQYDVR0fBDowODA2oDSgMoYwaHR0cDovL2d0c3NsZHYtY3JsLmdlb3Ry
+dXN0LmNvbS9jcmxzL2d0c3NsZHYuY3JsMB0GA1UdDgQWBBRaMeKDGSFaz8Kvj+To
+j7eMOtT/zTAMBgNVHRMBAf8EAjAAMHUGCCsGAQUFBwEBBGkwZzAsBggrBgEFBQcw
+AYYgaHR0cDovL2d0c3NsZHYtb2NzcC5nZW90cnVzdC5jb20wNwYIKwYBBQUHMAKG
+K2h0dHA6Ly9ndHNzbGR2LWFpYS5nZW90cnVzdC5jb20vZ3Rzc2xkdi5jcnQwTAYD
+VR0gBEUwQzBBBgpghkgBhvhFAQc2MDMwMQYIKwYBBQUHAgEWJWh0dHA6Ly93d3cu
+Z2VvdHJ1c3QuY29tL3Jlc291cmNlcy9jcHMwDQYJKoZIhvcNAQEFBQADggEBAAo0
+rOkIeIDrhDYN8o95+6Y0QhVCbcP2GcoeTWu+ejC6I9gVzPFcwdY6Dj+T8q9I1WeS
+VeVMNtwJt26XXGAk1UY9QOklTH3koA99oNY3ARcpqG/QwYcwaLbFrB1/JkCGcK1+
+Ag3GE3dIzAGfRXq8fC9SrKia+PCdDgNIAFqe+kpa685voTTJ9xXvNh7oDoVM2aip
+v1xy+6OfZyGudXhXag82LOfiUgU7hp+RfyUG2KXhIRzhMtDOHpyBjGnVLB0bGYcC
+566Nbe7Alh38TT7upl/O5lA29EoSkngtUWhUnzyqYmEMpay8yZIV4R9AuUk2Y4HB
+kAuBvDPPm+C0/M4RLYs=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIID+jCCAuKgAwIBAgIDAjbSMA0GCSqGSIb3DQEBBQUAMEIxCzAJBgNVBAYTAlVT
+MRYwFAYDVQQKEw1HZW9UcnVzdCBJbmMuMRswGQYDVQQDExJHZW9UcnVzdCBHbG9i
+YWwgQ0EwHhcNMTAwMjI2MjEzMjMxWhcNMjAwMjI1MjEzMjMxWjBhMQswCQYDVQQG
+EwJVUzEWMBQGA1UEChMNR2VvVHJ1c3QgSW5jLjEdMBsGA1UECxMURG9tYWluIFZh
+bGlkYXRlZCBTU0wxGzAZBgNVBAMTEkdlb1RydXN0IERWIFNTTCBDQTCCASIwDQYJ
+KoZIhvcNAQEBBQADggEPADCCAQoCggEBAKa7jnrNpJxiV9RRMEJ7ixqy0ogGrTs8
+KRMMMbxp+Z9alNoGuqwkBJ7O1KrESGAA+DSuoZOv3gR+zfhcIlINVlPrqZTP+3RE
+60OUpJd6QFc1tqRi2tVI+Hrx7JC1Xzn+Y3JwyBKF0KUuhhNAbOtsTdJU/V8+Jh9m
+cajAuIWe9fV1j9qRTonjynh0MF8VCpmnyoM6djVI0NyLGiJOhaRO+kltK3C+jgwh
+w2LMpNGtFmuae8tk/426QsMmqhV4aJzs9mvIDFcN5TgH02pXA50gDkvEe4GwKhz1
+SupKmEn+Als9AxSQKH6a9HjQMYRX5Uw4ekIR4vUoUQNLIBW7Ihq28BUCAwEAAaOB
+2TCB1jAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFIz02ZMKR7wAoErOS3VuoLaw
+sn78MB8GA1UdIwQYMBaAFMB6mGiNifurBWQMEX2qfWW4ysxOMBIGA1UdEwEB/wQI
+MAYBAf8CAQAwOgYDVR0fBDMwMTAvoC2gK4YpaHR0cDovL2NybC5nZW90cnVzdC5j
+b20vY3Jscy9ndGdsb2JhbC5jcmwwNAYIKwYBBQUHAQEEKDAmMCQGCCsGAQUFBzAB
+hhhodHRwOi8vb2NzcC5nZW90cnVzdC5jb20wDQYJKoZIhvcNAQEFBQADggEBADOR
+NxHbQPnejLICiHevYyHBrbAN+qB4VqOC/btJXxRtyNxflNoRZnwekcW22G1PqvK/
+ISh+UqKSeAhhaSH+LeyCGIT0043FiruKzF3mo7bMbq1vsw5h7onOEzRPSVX1ObuZ
+lvD16lo8nBa9AlPwKg5BbuvvnvdwNs2AKnbIh+PrI7OWLOYdlF8cpOLNJDErBjgy
+YWE5XIlMSB1CyWee0r9Y9/k3MbBn3Y0mNhp4GgkZPJMHcCrhfCn13mZXCxJeFu1e
+vTezMGnGkqX2Gdgd+DYSuUuVlZzQzmwwpxb79k1ktl8qFJymyFWOIPllByTMOAVM
+IIi0tWeUz12OYjf+xLQ=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIF4TCCA8mgAwIBAgIJAMuLUWygLQmXMA0GCSqGSIb3DQEBCwUAMIGGMQswCQYD
+VQQGEwJJRTEQMA4GA1UECAwHSXJlbGFuZDEPMA0GA1UEBwwGRHVibGluMRgwFgYD
+VQQKDA9KbGl6YXJkIExpbWl0ZWQxEzARBgNVBAMMCkxvZ2VudHJpZXMxJTAjBgkq
+hkiG9w0BCQEWFnN1cHBvcnRAbG9nZW50cmllcy5jb20wHhcNMTQwMjI0MjA1MzQ2
+WhcNMTkwMjIzMjA1MzQ2WjCBhjELMAkGA1UEBhMCSUUxEDAOBgNVBAgMB0lyZWxh
+bmQxDzANBgNVBAcMBkR1YmxpbjEYMBYGA1UECgwPSmxpemFyZCBMaW1pdGVkMRMw
+EQYDVQQDDApMb2dlbnRyaWVzMSUwIwYJKoZIhvcNAQkBFhZzdXBwb3J0QGxvZ2Vu
+dHJpZXMuY29tMIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAymhjhWPh
+gz7tuk5Jj+ohRfjUMNoUKCvTPVCl5LPon7seXmt+FC0Cyf68VoGY8m5fuahWseKr
+uyw7Bk7Q18vFBvsGp38q7NvQYlcQ2pCj7Ln6AvSlYvoweS4pz1C9C479ODNj9U2I
+RcqNxfZX2alxZGsoGg0u/KS3RbXFZzyMGPSXbugzMAYFyoIJM1U1iGhrjj8yAGes
+pP1BeDwrK9qHOv2Uy3yF8UtNKRm+hYE0E+yv0+s8vQLYnHaaZFwt1hulo0CGDjpJ
+vZtmR5U0qRjdFE6RZJsetfPNYeUYYeyG8qwEKMK86K3Jj8J9MR4l21Q+rIzK7JMm
+4P3Rh/L4klWEKm48WhfAhlv43CSpt/6HWhBq3B400effQzudl2O6VfC1OIlKWQ3x
+jmAKZToIlIVeF7X/5z04Azhy2SVpQ1DNVGShlKIiyTIA04ny3udMdDr0InvmXHtn
+rQexpaw5uFYno2tmOSJiElx5c7fMQtOmXO6qd/s9TFsNH8hwJ9g+Vgof11gTOo6o
+MEEgzeVfMOPd5JOtPXOD+S9X0Vt0dUlCD4xbjpwH1kJ5hfTcLtmANDOAIjF+P9pY
+ajDLE9phYM9qydyRaTawyOS7GA7XaW/WPZzgbSZ3T9KNJIUU1c1OZd3JD4BsDOBD
+ZTRxHxanHeg2pAAmiNX1rIBwz5O8Zm13rT8CAwEAAaNQME4wHQYDVR0OBBYEFDk6
+qPSf6apMD0hAGrYutT+wdnqhMB8GA1UdIwQYMBaAFDk6qPSf6apMD0hAGrYutT+w
+dnqhMAwGA1UdEwQFMAMBAf8wDQYJKoZIhvcNAQELBQADggIBADQg6tx70qwG74dj
+af9QDXKHhGvp8SoGMNvioQGREhrAXb0JTFiEQAECJghiP8OH4PIOjsN/ON4YI+WW
+ZPdGlcPkUgFQ/bdB7eEyKtGa7hDfH1PLL1FqVhZjoLC6poCJJVo/Q9J2dlkGaksK
+/R6+QV4SYnzfPH4cKQoN4Q/F0VuzelonSVTk9BG72RsY1fQPrm6tA/sN5Nzl+a4W
+d1UnK4KXajQH1Qsnv8VTXyBc+8wM3C12m/lsqc2npgIqU/xlQQXgDBR087+A/dX3
+osXMzZfGhh6D/NyCKs7VuAsb7hRTPP/6WMgM3c9lSc05xZyXzEZ7FL4GYg3Gjsdg
+PFQMkgfMyiECBPudVzU2RyWuXdId+i0ezl1mBSrowa+eNCx2pI5Er7OAjvEQOAlC
+v50jvvwSU9dT39XkGNh+q5uxaFLxyr6WidT09xHi17RZhgcMzWkiShRRqum/rOfL
+TUPMGFvOjLiMiRZvHYhB3XjPqO5z3DEWT6Ux8IUN0aqNWCSLV2DOc/2riflxtExc
+V1XUj6wWPCNqNPvdXeuQl/yqOZM5ekBlPCpPyxztba8SrJZKVWRXJl3RxuKPuWIE
+XI7Mr8xQHVr1HLt/SU+by7Y7im6nyZUfOzTNMkic0RXgI0fqztetDpfLedN8Xlwn
+/1NE/L7egzmDtcwoSQYUTu8g5rI4
+-----END CERTIFICATE-----
+"""
+
+# ------------------- Auxiliary routines -------------------
+
+
+def report(message):
+    log.info(message)
+
+
+def die(message):
+    log.fatal(message)
+    sys.exit(EXIT_ERR)
+
+
+def app_quit():
+    sys.exit(EXIT_OK)
+
+
+# --------------- Classes definition section ---------------
+
+class Config:
+
+    def __init__(self):
+        self.debug = False
+        self.force = False
+
+        self.email = ''
+        self.password = ''
+
+        # Config-aware fields
+        self.account_key = ''
+        self.host_key = ''
+
+        # Miscellaneous
+        self.use_ssl = False
+        self.use_ca_provided = False
+        self.name = ''
+        self.host_name = ''
+
+        self.account_key_cmd_line_param = False
+        self.host_key_cmd_line_param = False
+
+        if not self.load():
+            self.save()  # Create default config
+
+    def process_parameters(self, argv):
+        """
+        Gets parameters from argv list and sets corresponding internal fields of
+        Config instance.
+        :param argv:
+        :return list(command):
+        """
+        try:
+            optlist, args = getopt.gnu_getopt(argv, '',
+                                              'account-key= host-key= name= hostname= use-ca-provided force debug'.split())
+        except getopt.GetoptError, err:
+            die('Parameter error: ' + str(err))
+
+        for name, value in optlist:
+            if name == '--account-key':
+                self.account_key_cmd_line_param = True
+                if Config.verify_account_key(value):
+                    self.account_key = value
+                else:
+                    die(ACCOUNT_KEY_FORMAT_ERROR + KEYS_FORMAT_HELP)
+            elif name == '--host-key':
+                self.host_key_cmd_line_param = True
+                if Config.verify_host_key(value):
+                    self.host_key = value
+                else:
+                    die(HOST_KEY_FORMAT_ERROR + KEYS_FORMAT_HELP)
+            elif name == "--use-ca-provided":
+                self.use_ca_provided = True
+            elif name == '--name':
+                self.name = value
+            elif name == '--hostname':
+                self.host_name = value
+            elif name == '--force':
+                self.force = True
+            elif name == '--debug':
+                self.debug = True
+            else:
+                # Unknown parameter:
+                die(UNKNOWN_PARAMETER_ERROR + value)
+
+        if self.host_key_cmd_line_param and not self.account_key_cmd_line_param:
+            die('Please specify --host-key parameter only alongside with --account-key parameter!')
+
+        return args
+
+    def save(self):
+        """
+        Saves all internal fields of Config instance to the config file.
+        :return:
+        """
+        try:
+            log.debug(
+                '[DEBUG]: Saving config to file ' + LE_RSYSLOG_CONFIG_FILE)
+
+            conf = ConfigParser.SafeConfigParser()
+            Config.get_or_create_config_dir()
+
+            try:
+                conf_file = open(LE_RSYSLOG_CONFIG_FILE, 'wb+')
+            except Exception, e:
+                die(CONFIG_FILE_OPEN_ERROR)
+
+            # Populate config object
+            conf.add_section(CONF_MAIN_SECTION)
+
+            # Default values if instance values are not set
+            account_key = ''
+            host_key = ''
+
+            if not self.account_key is None:
+                account_key = self.account_key
+            if not self.host_key is None:
+                host_key = self.host_key
+
+            # Push values to config object
+            conf.set(CONF_MAIN_SECTION, CONF_ACOUNT_KEY_PARAM, account_key)
+            conf.set(CONF_MAIN_SECTION, CONF_HOST_KEY_PARAM, host_key)
+
+            conf.write(conf_file)
+        except IOError as e:
+            report(CONFIG_FILE_WRITE_ERROR)
+            die(e)
+
+    def load(self):
+        """
+        Loads data from config file and initializes internal fields of config instance.
+        :return True if config is loaded and parsed successfully:
+        """
+        try:
+            log.debug(
+                '[DEBUG]: Loading config from file ' + LE_RSYSLOG_CONFIG_FILE)
+
+            conf = ConfigParser.SafeConfigParser({
+                CONF_HOST_KEY_PARAM: '',
+                CONF_ACOUNT_KEY_PARAM: ''
+            })
+
+            conf.read(LE_RSYSLOG_CONFIG_FILE)
+
+            account_key = conf.get(CONF_MAIN_SECTION, CONF_ACOUNT_KEY_PARAM)
+            host_key = conf.get(CONF_MAIN_SECTION, CONF_HOST_KEY_PARAM)
+
+            if account_key != '':
+                if not Config.verify_account_key(account_key):
+                    report(MALFORMED_KEY_FROM_CONFIG %
+                           (CONF_ACOUNT_KEY_PARAM, CONF_ACOUNT_KEY_PARAM))
+            if host_key != '':
+                if not Config.verify_host_key(host_key):
+                    report(MALFORMED_KEY_FROM_CONFIG %
+                           (CONF_HOST_KEY_PARAM, CONF_HOST_KEY_PARAM))
+
+            # Corrupted config, but host still may be previously registered
+            if account_key == '' and host_key != '':
+                report('Warning! Account key parameter in the config is empty. It is recommended to ' +
+                       'restore it either manually or using \"sudo lersyslog register ...\" command.')
+
+            self.account_key = account_key
+            self.host_key = host_key
+
+        except IOError as e:
+            report(CONFIG_FILE_READ_ERROR + e.message)
+            return False
+        except ConfigParser.NoSectionError as e:
+            report(e.message)
+            return False
+        except ConfigParser.NoOptionError as e:
+            report(e.message)
+            return False
+        else:
+            return True
+
+    def set_name(self):
+        """
+        Sets host name if not set already. The new host name is
+        delivered from its hostname.
+        """
+        if self.name is None or self.name == '':
+            self.name = self.set_hostname().split('.')[0]
+        return self.name
+
+    def set_hostname(self):
+        """
+        Sets the hostname parameter based on server network name. If
+        the hostname is set already, it is kept untouched.
+        """
+        host_name = socket.getfqdn()
+        if self.host_name is None or self.host_name == '':
+            self.host_name = host_name
+        return host_name
+
+    @staticmethod
+    def get_or_create_config_dir():
+        """
+        Tries to create config directory. Returns it's path if succeeds.
+        :return str - Path to config directory:
+        """
+        try:
+            os.makedirs(LE_LERSYSLOG_CONFIG_PATH)
+        except OSError as e:
+            if e.errno != errno.EEXIST:
+                die(CONFIG_PATH_CREATION_ERROR + e.message)
+        return LE_LERSYSLOG_CONFIG_PATH
+
+    @staticmethod
+    def verify_account_key(value):
+        """
+        Checks given key to be a valid GUID.
+        :param value:
+        :return True if key is valid:
+        """
+        return LE_GUID_REGEXP.match(value)
+
+    @staticmethod
+    def verify_host_key(value):
+        """
+        Checks given key to be a valid GUID.
+        :param value:
+        :return True if key is valid:
+        """
+        return LE_GUID_REGEXP.match(value)
+
+    @staticmethod
+    def validate_email(value):
+        return LE_EMAIL_REGEXP.match(value)
+
+
+class ServerHTTPSConnection(httplib.HTTPSConnection):
+
+    """
+    A slight modification of HTTPSConnection to verify the certificate
+    """
+
+    def __init__(self, server, cert_file):
+        if not config.use_ssl:
+            httplib.HTTPSConnection.__init__(self, server)
+        else:
+            self.cert_file = cert_file
+            httplib.HTTPSConnection.__init__(self, server, cert_file=cert_file)
+
+    def wrap_socket(self, sock, certs=None, reqs=None):
+        if config.use_ssl:
+            return ssl.wrap_socket(sock, ca_certs=certs, cert_reqs=reqs)
+        else:
+            return sock
+
+    def connect(self):
+        if not config.use_ssl:
+            return httplib.HTTPSConnection.connect(self)
+        sock = ServerHTTPSConnection.create_connection(self.host, self.port)
+        try:
+            if self._tunnel_host:
+                self.sock = sock
+                self._tunnel()
+        except AttributeError:
+            pass
+        self.sock = self.wrap_socket(sock, self.cert_file, ssl.CERT_REQUIRED)
+
+    @staticmethod
+    def create_connection(host, port):
+        """
+        A simplified version of socket.create_connection from Python 2.6.
+        """
+        for addr_info in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+            af, stype, proto, cn, sa = addr_info
+            soc = None
+            try:
+                soc = socket.socket(af, stype, proto)
+                soc.connect(sa)
+                return soc
+            except socket.error:
+                if socket:
+                    soc.close()
+
+        raise socket.error, "Cannot make connection to %s:%s" % (host, port)
+
+
+class API:
+
+    class Domain:
+
+        """ Logentries domains. """
+        # General domains
+        MAIN = 'logentries.com'
+        API = 'api.logentries.com'
+        DATA = 'data.logentries.com'  # TODO
+        PULL = 'pull.logentries.com'
+        LE_SERVER_API = '/'
+        # Account-related addresses
+        ACCOUNT_KEYS_API = 'https://logentries.com/agent/account-keys/'
+        NON_SSL_PORT = 10000
+
+    @staticmethod
+    def api_request(request, required=False, check_status=False, silent=False, die_on_error=True, method='POST'):
+        """
+        Processes a request on the logentries domain.
+        """
+        # Obtain response
+        if method == 'POST':
+            response, conn = API.get_response(method, API.Domain.LE_SERVER_API, urllib.urlencode(request),
+                                              silent=silent, die_on_error=die_on_error, domain=API.Domain.API)
+        else:
+            response, conn = API.get_response(method, urllib.quote('/' + config.account_key + '/' + request),
+                                              silent=silent, die_on_error=die_on_error, domain=API.Domain.API)
+        # Check the response
+        if not response:
+            if required:
+                die("Error: Cannot process LE request, no response")
+            if conn:
+                conn.close()
+            return None
+        if response.status != 200:
+            if required:
+                die("Error: Cannot process LE request: (%s)" % response.status)
+            conn.close()
+            return None
+
+        xresponse = response.read()
+        conn.close()
+        log.debug('[DEBUG]: Domain response: "%s"' % xresponse)
+        try:
+            d_response = json_loads(xresponse)
+        except ValueError:
+            error = 'Error: Invalid response, parse error.'
+            if die_on_error:
+                die(error)
+            else:
+                log.info(error)
+                d_response = None
+
+        if check_status and d_response['response'] != 'ok':
+            error = "Error: %s" % d_response['reason']
+            if die_on_error:
+                die(error)
+            else:
+                log.info(error)
+                d_response = None
+
+        return d_response
+
+    @staticmethod
+    def do_request(conn, operation, addr, data=None, headers={}):
+        log.debug('[DEBUG]: Domain request: %s %s %s %s' %
+                  (operation, addr, data, headers))
+        if data:
+            conn.request(operation, addr, data, headers=headers)
+        else:
+            conn.request(operation, addr, headers=headers)
+
+    @staticmethod
+    def get_response(operation, addr, data=None, headers={}, silent=False, die_on_error=True, domain=Domain.API):
+        """
+        Returns response from the domain or API server.
+        """
+        response = None
+        conn = None
+        try:
+            conn = API.domain_connect(domain)
+            API.do_request(conn, operation, addr, data, headers)
+            response = conn.getresponse()
+            return response, conn
+        except socket.sslerror, msg:  # Network error
+            if not silent:
+                log.info("[DEBUG]: SSL error: %s" % msg)
+        except socket.error, msg:  # Network error
+            if not silent:
+                log.debug("[DEBUG]: Network error: %s" % msg)
+        except httplib.BadStatusLine as e:
+            error = "Internal error, bad status line in HTTP response: "
+            if die_on_error:
+                die(error + e.message)
+            else:
+                log.info(error)
+
+        return None, None
+
+    @staticmethod
+    def domain_connect(domain):
+        """
+        Connects to the domain specified.
+        """
+        # Find the correct server address
+        s = domain
+        log.debug('[DEBUG]: Connecting to %s', s)
+
+        # Pass the connection
+        if config.use_ssl:
+            return API.make_https_connection(s)
+        else:
+            return httplib.HTTPConnection(s)
+
+    @staticmethod
+    def make_https_connection(s):
+        """
+        Makes HTTPS connection. Tried all available certificates.
+        """
+        if not config.use_ca_provided:
+            # Try to connect with system certificate
+            try:
+                cert_file = SSL.system_cert_file()
+                if cert_file:
+                    return ServerHTTPSConnection(s, cert_file)
+            except socket.error:
+                pass
+
+        # Try to connect with our default certificate
+        cert_file = SSL.default_cert_file()
+        if not cert_file:
+            die(CERT_ERROR)
+        return ServerHTTPSConnection(s, cert_file)
+
+    @staticmethod
+    def retrieve_account_keys():
+        """
+        Retrieves account keys from the web server.
+        """
+        username = config.email
+        password = config.password
+
+        try:
+            c = API.domain_connect(API.Domain.MAIN)
+            c.request('POST', API.Domain.ACCOUNT_KEYS_API,
+                      urllib.urlencode(
+                          {'username': username, 'password': password}),
+                      {
+                          'Referer': 'https://logentries.com/login/',
+                          'Content-type': 'application/x-www-form-urlencoded',
+                      })
+            response = c.getresponse()
+            if not response or response.status != HTTP_OK:
+                resp_val = 'err'
+                if response:
+                    resp_val = response.status
+                if resp_val == HTTP_FORBIDDEN:
+                    die('Error: Login failed. Invalid credentials.')
+                else:
+                    report(
+                        'Error: Unexpected login response from logentries: ')
+                    die(resp_val)
+            else:
+                data = json_loads(response.read())
+                return data['accounts']
+        except socket.error as e:
+            die('Error: Cannot contact server ' + e.message)
+        except ValueError as e:
+            die('Error: Invalid response from the server (Parsing error ' +
+                e.message)
+        except KeyError:
+            die('Error: Invalid response from the server, user key not present.')
+
+    @staticmethod
+    def request_host_registration():
+        si = Misc.system_detect(True)
+
+        # Set or use predefined name and host name for the machine being
+        # registered
+        config.set_name()
+        config.set_hostname()
+
+        # Try to register this host - obtain host key for it.
+        request = {"request": "register",
+                   'user_key': config.account_key,
+                   'name': config.name,
+                   'hostname': config.host_name,
+                   'system': si['system'],
+                   'distname': si['distname'],
+                   'distver': si['distver']}
+
+        log.debug('[DEBUG]: Processing registration request:')
+        log.debug(request)
+
+        response = API.api_request(request, True, True)
+        config.host_key = response['host_key']
+        log.debug('[DEBUG]: Got host key: ' + config.host_key)
+
+    @staticmethod
+    def follow_file(file_path, name, type_opt):
+        """
+        Creates a new log to follow the file given.
+        """
+        request = {"request": "new_log",
+                   "user_key": config.account_key,
+                   "host_key": config.host_key,
+                   "name": name,
+                   "filename": file_path,
+                   "type": type_opt,
+                   "source": "token",
+                   "follow": "true"}
+        API.api_request(request, True, True)
+
+    @staticmethod
+    def get_followed_logs():
+        host = API.api_request(
+            'hosts/%s/' % config.host_key, True, True, False, True, 'GET')
+        logs = host.get('list')
+        return logs
+
+
+class Misc:
+
+    @staticmethod
+    def rfile(name):
+        """
+        Returns content of the file, without trailing newline.
+        """
+        x = open(name).read()
+        if len(x) != 0 and x[-1] == '\n':
+            x = x[0:len(x) - 1]
+        return x
+
+    @staticmethod
+    def call(command):
+        """
+         Calls the given command in OS environment.
+         """
+        x = subprocess.Popen(
+            command, stdout=subprocess.PIPE, shell=True).stdout.read()
+        if len(x) == 0:
+            return ''
+        if x[-1] == '\n':
+            x = x[0:len(x) - 1]
+        return x
+
+    @staticmethod
+    def release_test(filename, distname, system_info):
+        if os.path.isfile(filename):
+            system_info['distname'] = distname
+            system_info['distver'] = Misc.rfile(filename)
+            return True
+        return False
+
+    @staticmethod
+    def system_detect(details):
+        """
+        Detects the current operating system. Returned information contains:
+            distname: distribution name
+            distver: distribution version
+            kernel: kernel type
+            system: system name
+            hostname: host name
+        """
+        uname = platform.uname()
+        sys = uname[0]
+        system_info = dict(system=sys, hostname=socket.getfqdn(),
+                           kernel='', distname='', distver='')
+
+        if not details:
+            return system_info
+
+        if sys == "SunOS":
+            pass
+        elif sys == "AIX":
+            system_info['distver'] = Misc.call("oslevel -r")
+        elif sys == "Darwin":
+            system_info['distname'] = Misc.call("sw_vers -productName")
+            system_info['distver'] = Misc.call("sw_vers -productVersion")
+            system_info['kernel'] = uname[2]
+
+        elif sys == "Linux":
+            system_info['kernel'] = uname[2]
+            # XXX CentOS?
+            releases = [
+                ['/etc/debian_version', 'Debian'],
+                ['/etc/UnitedLinux-release', 'United Linux'],
+                ['/etc/annvix-release', 'Annvix'],
+                ['/etc/arch-release', 'Arch Linux'],
+                ['/etc/arklinux-release', 'Arklinux'],
+                ['/etc/aurox-release', 'Aurox Linux'],
+                ['/etc/blackcat-release', 'BlackCat'],
+                ['/etc/cobalt-release', 'Cobalt'],
+                ['/etc/conectiva-release', 'Conectiva'],
+                ['/etc/fedora-release', 'Fedora Core'],
+                ['/etc/gentoo-release', 'Gentoo Linux'],
+                ['/etc/immunix-release', 'Immunix'],
+                ['/etc/knoppix_version', 'Knoppix'],
+                ['/etc/lfs-release', 'Linux-From-Scratch'],
+                ['/etc/linuxppc-release', 'Linux-PPC'],
+                ['/etc/mandriva-release', 'Mandriva Linux'],
+                ['/etc/mandrake-release', 'Mandrake Linux'],
+                ['/etc/mandakelinux-release', 'Mandrake Linux'],
+                ['/etc/mklinux-release', 'MkLinux'],
+                ['/etc/nld-release', 'Novell Linux Desktop'],
+                ['/etc/pld-release', 'PLD Linux'],
+                ['/etc/redhat-release', 'Red Hat'],
+                ['/etc/slackware-version', 'Slackware'],
+                ['/etc/e-smith-release', 'SME Server'],
+                ['/etc/release', 'Solaris SPARC'],
+                ['/etc/sun-release', 'Sun JDS'],
+                ['/etc/SuSE-release', 'SuSE'],
+                ['/etc/sles-release', 'SuSE Linux ES9'],
+                ['/etc/tinysofa-release', 'Tiny Sofa'],
+                ['/etc/turbolinux-release', 'TurboLinux'],
+                ['/etc/ultrapenguin-release', 'UltraPenguin'],
+                ['/etc/va-release', 'VA-Linux/RH-VALE'],
+                ['/etc/yellowdog-release', 'Yellow Dog'],
+            ]
+
+            # Check for known system IDs
+            for release in releases:
+                if Misc.release_test(release[0], release[1], system_info):
+                    break
+            # Check for general LSB system
+            if os.path.isfile(LSB_RELEASE):
+                try:
+                    fields = dict((a.split('=') for a in Misc.rfile(
+                        LSB_RELEASE).split('\n') if len(a.split('=')) == 2))
+                    system_info['distname'] = fields['DISTRIB_ID']
+                    system_info['distver'] = fields['DISTRIB_RELEASE']
+                except ValueError:
+                    pass
+                except KeyError:
+                    pass
+        return system_info
+
+
+class SSL:
+    authority_certificate = authority_certificate
+    authority_certificate_files = [  # Debian 5.x, 6.x, 7.x, Ubuntu 9.10, 10.4, 13.0
+                                     # Fedora 12, Fedora 13, CentOS 5
+                                     "/etc/ssl/certs/ca-certificates.crt",
+                                     # Amazon AMI
+                                     "/usr/share/purple/ca-certs/GeoTrust_Global_CA.pem",
+                                     "/etc/pki/tls/certs/ca-bundle.crt"]
+
+    @staticmethod
+    def get_cert():
+        if not config.use_ca_provided:
+            cert_name = SSL.system_cert_file()
+            if cert_name is None:
+                cert_name = SSL.default_cert_file()
+        else:
+            cert_name = SSL.default_cert_file()
+        if cert_name is None:
+            die('Cannot get default certificate file name to provide connection over SSL!')
+
+    @staticmethod
+    def default_cert_file_name():
+        return LE_LERSYSLOG_CONFIG_PATH + '/' + LE_LERSYSLOG_CERT_NAME
+
+    @staticmethod
+    def write_default_cert_file():
+        """
+        Writes default certificate file in the configuration directory.
+        """
+        Config.get_or_create_config_dir()
+        cert_filename = SSL.default_cert_file_name()
+        f = open(cert_filename, 'wb')
+        f.write(authority_certificate)
+        f.close()
+
+    @staticmethod
+    def default_cert_file():
+        """
+        Returns location of the default certificate file or None. It tries to write the
+        certificate file if it is not there or it is outdated.
+        """
+        cert_filename = SSL.default_cert_file_name()
+        try:
+            # If the certificate file is not there, create it
+            if not os.path.exists(cert_filename):
+                SSL.write_default_cert_file()
+                return cert_filename
+
+            # If it is there, check if it is outdated
+            curr_cert = Misc.rfile(cert_filename)
+            if curr_cert != authority_certificate:
+                SSL.write_default_cert_file()
+        except IOError:
+            # Cannot read/write certificate file, ignore
+            return None
+        return cert_filename
+
+    @staticmethod
+    def system_cert_file():
+        """
+        Finds the location of our lovely site's certificate on the system or None.
+        """
+        for f in SSL.authority_certificate_files:
+            if os.path.exists(f):
+                return f
+        return None
+
+
+class Worker:
+
+    def __init__(self):
+        pass
+
+    @staticmethod
+    def cmd_register(args):
+
+        if config.host_key == '' or config.force or config.account_key_cmd_line_param:
+            try:
+                # Manual (re)registration with account and host keys given from
+                # command line.
+                if config.account_key_cmd_line_param:
+                    if config.host_key != '' and not config.force:
+                        die(ERROR_ALREADY_REGISTERED % config.host_key)
+
+                    # A user stated --host-key in command line, so use it
+                    if config.host_key_cmd_line_param:
+                        config.save()
+                    else:
+                        # Only --account-key had been given - need to get host
+                        # key from LE
+                        API.request_host_registration()
+                    report('Registered with account key = %s \nand host key = %s' % (config.account_key,
+                                                                                     config.host_key))
+                    return
+
+                # Get user's e-mail and password
+                interface = UserInterface()
+                credentials = interface.get_user_credentials()
+                config.email = credentials['email']
+                config.password = credentials['password']
+
+                # Get account keys associated with given credentials.
+                accounts = API.retrieve_account_keys()
+                if len(accounts) == 0:
+                    die(NO_ASSOC_ACCOUNTS)
+
+                account = interface.choose_account_key_from_list(accounts)
+                config.account_key = account['account_key']
+
+                API.request_host_registration()
+                config.save()
+
+                report("Registered %s (%s)" % (config.name, config.host_name))
+
+            except Exception as e:
+                die(e.message)
+        else:
+            die(ERROR_ALREADY_REGISTERED % config.host_key)
+
+    @staticmethod
+    def cmd_help(args):
+        report(USAGE_HELP_MESSAGE)
+
+    @staticmethod
+    def cmd_follow(args):
+
+        if config.host_key == '' or config.account_key == '':
+            die(ERROR_NOT_REGISTERED)
+
+        if len(args) == 0:
+            report('Please, specify files to be followed.')
+            die(USAGE_HELP_MESSAGE)
+
+        helper = RSyslogHelper(RSYSLOG_CONF_FILE)
+        helper.parser.parse()
+        # Prints parsed object if debug switch is set to True
+        helper.parser.print_parsed_conf()
+
+        # Isert imfile module if it is not already there
+        mod_imfile = helper.parser.get_check_item_by_name(
+            'imfile', RSyslogHelper.ConfigParser.TYPE_MODLOAD)
+        if mod_imfile is None:
+            mod_imfile = RSyslogHelper.ModLoadTemplate('imfile')
+            helper.parser.add_item(mod_imfile)
+
+        logs = API.get_followed_logs()
+
+        for name in args:
+            report('Adding file ' + name + '...')
+            filename = os.path.abspath(args[0])
+
+            if not os.path.exists(filename) or not os.path.isfile(filename):
+                report('File ' + filename + ' does not exist!')
+                continue
+
+            req_name = os.path.basename(filename)
+            already_followed = False
+            need_to_do_request_only = False
+            token = ''
+
+            item = helper.parser.get_check_item_by_name(
+                name, RSyslogHelper.ConfigParser.TYPE_FILE)
+
+            for log in logs:
+                if log['filename'] == filename and log['follow'] == 'true':
+                    already_followed = True
+
+            if not item is None:
+                if already_followed:
+                    report('File ' + name + ' is already followed.')
+                else:
+                    report('Entry for file ' + name + ' exists in rsyslog.conf but absent on Logentries\' server. ' +
+                           'Will request the Server to follow the file.')
+                    need_to_do_request_only = True
+            else:
+                API.follow_file(filename, req_name, '')
+                logs = API.get_followed_logs()
+                for current_log in logs:
+                    if current_log['filename'] == filename:
+                        token = current_log['token']
+
+                if not need_to_do_request_only:
+                    file_item = RSyslogHelper.RsyslogFollowedFileTemplate(
+                        filename, token, 'info', 'local7')
+                    template = RSyslogHelper.RsyslogLogMsgTemplate(
+                        file_item.tag, file_item.token)
+                    routing_rule = RSyslogHelper.RoutingRuleTemplate(file_item.tag, template.name, API.Domain.DATA,
+                                                                     str(API.Domain.NON_SSL_PORT))
+                    helper.parser.add_item(file_item)
+                    helper.parser.add_item(template)
+                    helper.parser.add_item(routing_rule)
+
+                report('Success! Token: ' + token)
+
+        # Check for polling interval statement to be present
+        interval = helper.parser.get_check_item_by_name(
+            '', RSyslogHelper.ConfigParser.TYPE_POLLING_INTERVAL)
+        if interval is None:
+            new_interval = RSyslogHelper.PollingIntervalTemplate(
+                1)  # By default
+            helper.parser.add_item(new_interval)
+
+        helper.save_conf()
+        report('Config successfully saved to %s' % RSYSLOG_CONF_FILE)
+
+
+class UserInterface:
+    # Field types
+    MESSAGE = 0
+    INPUT = 1
+    PASSWORD = 2
+
+    def get_user_credentials(self):
+        log.debug('[DEBUG]: Getting user credentials.')
+
+        credentials = dict()
+        form_fields = list()
+        form_fields.append(UserInterface.create_dialog_item('header_msg', UserInterface.MESSAGE, None,
+                                                            CREDENTIALS_DLG_HEADER))
+        form_fields.append(UserInterface.create_dialog_item('email', UserInterface.INPUT, Config.validate_email,
+                                                            EMAIL_INPUT_MSG))
+        form_fields.append(UserInterface.create_dialog_item('password', UserInterface.PASSWORD, None,
+                                                            PASSWORD_INPUT_MSG))
+        credentials = self.create_form(form_fields)
+
+        try:
+            if credentials['email'] != '' and credentials['password'] != '':
+                return credentials
+            else:
+                raise ValueError(CREDENTIALS_INPUT_EMPTY_ERROR)
+        except Exception as e:
+            raise e
+
+    def create_form(self, fields):
+        log.debug('[DEBUG]: Creating input form...')
+
+        if not fields:
+            log.debug('[DEBUG]: Fields list is empty.')
+            return dict()
+
+        return self.create_simple_form(fields)
+
+    @staticmethod
+    def clear_scr():
+        os.system('clear')
+
+    @staticmethod
+    def create_simple_form(fields):
+        data = dict()
+        for field, name, validator, init_msg in fields:
+            if field == UserInterface.MESSAGE:
+                print(init_msg)
+            if field == UserInterface.INPUT:
+                val = raw_input(init_msg)
+                if not validator is None:
+                    if validator(val):
+                        data[name] = val
+                    else:
+                        data[name] = None
+                else:
+                    data[name] = val
+            if field == UserInterface.PASSWORD:
+                val = getpass.getpass(init_msg)
+                data[name] = val
+        return data
+
+    def choose_account_key_from_list(self, accounts):
+        log.debug('[DEBUG]: Getting a key from the list...')
+
+        form_fields = list()
+        form_fields.append(UserInterface.create_dialog_item('menu_msg', UserInterface.MESSAGE, None,
+                                                            ACCOUNT_CHOICE_DLG))
+        num_accounts = len(accounts)
+        index = 0
+        for account in accounts:
+            index += 1
+            form_fields.append(UserInterface.create_dialog_item('menu_item', UserInterface.MESSAGE, None,
+                                                                str(index) + '. ' + account['name']))
+        form_fields.append(UserInterface.create_dialog_item('input', UserInterface.INPUT, None,
+                                                            ACCOUNT_CHOICE_MSG))
+        i = 0
+        while True:
+            choice = self.create_form(form_fields)
+            try:
+                i = int(choice['input'])
+            except:
+                pass
+            if i < 1 or i > num_accounts + 1:
+                report('Please, input number from 1 to ' + str(num_accounts))
+            else:
+                return accounts[i - 1]
+
+    @staticmethod
+    def create_dialog_item(name, type, validator, init_msg):
+        return (type, name, validator, init_msg)
+
+
+class RSyslogHelper:
+
+    """
+    rsyslog config parser and helper
+    """
+
+    class ConfigParser:
+
+        # RSyslog helper's regexps
+        RSYSLOG_MOD_LEGACY = re.compile('(\$ModLoad.+\n)')
+        RSYSLOG_LE_TEMPLATE_LEGACY = re.compile('^(\$template\s.+\s*,\s*\"([0-9a-f]{8}\-[0-9a-f]{4}\-[0-9a-f]{4}\-[0-9a-f]{4}' +
+                                                '\-[0-9a-f]{12})\s*%.+%\s*%.+%\s*%.+%\s*\\n\"\n)', re.IGNORECASE)
+        RSYSLOG_GENERAL_TEMPLATE_LEGACY = re.compile('^(\$template.+\n)')
+        RSYSLOG_ROUTING_RULE_TEMPLATE = re.compile(
+            '^(if\s*\$.+\s*==\s*\'.+\'\s*then\s*.+\n)|^(\*\.\*\s*.+\n)', re.IGNORECASE)
+
+        # InputFile parts
+        RSYSLOG_INFILE_HDR_LEGACY = re.compile(
+            '^(\$InputFileName\s*.+\n)', re.IGNORECASE)
+        RSYSLOG_INFILE_TAG_LEGACY = re.compile(
+            '^(\$InputFileTag\s*.+\n)', re.IGNORECASE)
+        RSYSLOG_INFILE_STF_LEGACY = re.compile(
+            '^(\$InputFileStateFile\s*.+\n)', re.IGNORECASE)
+        RSYSLOG_INFILE_SVR_LEGACY = re.compile(
+            '^(\$InputFileSeverity\s*.+\n)', re.IGNORECASE)
+        RSYSLOG_INFILE_FCL_LEGACY = re.compile(
+            '^(\$InputFileFacility\s*.+\n)', re.IGNORECASE)
+
+        RSYSLOG_INFILE_MONITOR_LEGACY = re.compile(
+            '^(\$InputRunFileMonitor.*\n)', re.IGNORECASE)
+
+        RSYSLOG_INFILE_POLLING_LEGACY = re.compile(
+            '^(\$InputFilePollInterval\s*\d+\n)', re.IGNORECASE)
+
+        # Config notation
+        CONF_OLD_FORMAT = 0
+        CONF_NEW_FORMAT = 1
+
+        # Config item types
+        TYPE_OTHER = 0  # Sections that are not processes by this tool
+        TYPE_MODLOAD = 1  # ModLoad section
+        TYPE_TEMPLATE = 2  # $template section
+        TYPE_FILE = 3  # InputFile section
+        TYPE_ROUTING_RULE = 4  # routing rule (if $name == ...)
+        TYPE_FILE_MONITOR = 5  # File monitor record
+        TYPE_POLLING_INTERVAL = 6  # Polling interval directive
+
+        class ConfigSection:
+
+            def __init__(self, format, type):
+                self.format = format
+                self.type = type
+                self.items = collections.OrderedDict()
+                self.other_items_count = 0
+                self.polling_items_count = 0
+                self.routing_rules_general = 0
+
+            def get_type(self):
+                return self.type
+
+            def add_item(self, item):
+                if item == '\n':
+                    name = 'whitespace'
+                    data = item
+                else:
+                    if self.type == RSyslogHelper.ConfigParser.TYPE_OTHER:
+                        name = 'other' + str(self.other_items_count)
+                        self.other_items_count += 1
+                    elif self.type == RSyslogHelper.ConfigParser.TYPE_POLLING_INTERVAL:
+                        name = 'polling' + str(self.polling_items_count)
+                        self.polling_items_count += 1
+                    elif self.type == RSyslogHelper.ConfigParser.TYPE_MODLOAD:
+                        # Module name, like immof, filemod etc.
+                        name = item.split(' ')[1]
+                        # Cut off trailing \n for items without comments
+                        name = name.split('\n')[0]
+                    elif self.type == RSyslogHelper.ConfigParser.TYPE_FILE:
+                        parts = item.split(' ')
+                        if len(parts) > 1:
+                            name = item.split(' ')[1]
+                        else:
+                            name = parts[0]  # RunInputFileMonitor case
+                        name = name.split('\n')[0]
+                    elif self.type == RSyslogHelper.ConfigParser.TYPE_TEMPLATE:
+                        name = item.split(' ')[1].split(',')[0]
+                    elif self.type == RSyslogHelper.ConfigParser.TYPE_ROUTING_RULE:
+                        if item.startswith('*.*'):
+                            name = 'rout_rule' + \
+                                str(self.routing_rules_general)
+                            self.routing_rules_general += 1
+                        else:
+                            name = item.split('==')[1].split(' ')[1]
+                    data = item
+
+                self.items[name] = data
+
+            def get(self, name):
+                return self.items.get(name)
+
+            def has(self, name):
+                return not self.items.get(name) is None
+
+            def how_many(self):
+                return len(self.items)
+
+        def __init__(self, conf):
+            self.conf = conf
+            self.parsed_conf = list()
+
+        def get_items_of_type(self, type):
+            selected = list()
+            for item in self.parsed_conf:
+                if item.get_type() == type:
+                    selected.append(item)
+            return selected
+
+        def parse(self):
+            if self.conf is None:
+                return
+
+            last_section_type = None
+            line = ''
+
+            for line in self.conf:
+                type = RSyslogHelper.ConfigParser.detect_type(line)
+                if last_section_type != type:
+                    section = RSyslogHelper.ConfigParser.ConfigSection(
+                        RSyslogHelper.ConfigParser.detect_format(line), type)
+                    last_section_type = type
+                    self.parsed_conf.append(section)
+                    section.add_item(line)
+                    line = ''
+                else:
+                    section.add_item(line)
+
+        # Debugging purpose
+        def print_parsed_conf(self, item_type=None):
+            for item in self.parsed_conf:
+                if not item_type is None:
+                    if item.get_type() == item_type:
+                        log.debug(item.items)
+                else:
+                    log.debug(item.items)
+
+        @staticmethod
+        def detect_type(line):
+            if RSyslogHelper.ConfigParser.RSYSLOG_INFILE_TAG_LEGACY.match(line) or \
+                    RSyslogHelper.ConfigParser.RSYSLOG_INFILE_FCL_LEGACY.match(line) or \
+                    RSyslogHelper.ConfigParser.RSYSLOG_INFILE_STF_LEGACY.match(line) or \
+                    RSyslogHelper.ConfigParser.RSYSLOG_INFILE_SVR_LEGACY.match(line) or \
+                    RSyslogHelper.ConfigParser.RSYSLOG_INFILE_HDR_LEGACY.match(line) or \
+                    RSyslogHelper.ConfigParser.RSYSLOG_INFILE_TAG_LEGACY.match(line) or \
+                    RSyslogHelper.ConfigParser.RSYSLOG_INFILE_MONITOR_LEGACY.match(line):
+                return RSyslogHelper.ConfigParser.TYPE_FILE
+            elif RSyslogHelper.ConfigParser.RSYSLOG_MOD_LEGACY.match(line):
+                return RSyslogHelper.ConfigParser.TYPE_MODLOAD
+            elif RSyslogHelper.ConfigParser.RSYSLOG_ROUTING_RULE_TEMPLATE.match(line):
+                return RSyslogHelper.ConfigParser.TYPE_ROUTING_RULE
+            elif RSyslogHelper.ConfigParser.RSYSLOG_GENERAL_TEMPLATE_LEGACY.match(line):
+                return RSyslogHelper.ConfigParser.TYPE_TEMPLATE
+            elif RSyslogHelper.ConfigParser.RSYSLOG_INFILE_POLLING_LEGACY.match(line):
+                return RSyslogHelper.ConfigParser.TYPE_POLLING_INTERVAL
+            else:
+                return RSyslogHelper.ConfigParser.TYPE_OTHER
+
+        def serialize(self):
+            serialized = ''
+            for item in self.parsed_conf:
+                for sub_item in item.items:
+                    serialized += (item.items[sub_item])
+            return serialized
+
+        def add_item(self, new_item):
+            item_type = new_item.get_type()
+            ins_index = 0
+            curr_index = 0
+            for item in self.parsed_conf:
+                if item.get_type() == item_type:
+                    curr_index = self.parsed_conf.index(item)
+                    if curr_index > ins_index:
+                        ins_index = curr_index
+            if ins_index == 0:
+                ins_index = len(self.parsed_conf)
+
+            if item_type == RSyslogHelper.ConfigParser.TYPE_FILE:
+                line0 = new_item.get()[0]
+            else:
+                line0 = new_item.get()
+
+            config_item = RSyslogHelper.ConfigParser.ConfigSection(RSyslogHelper.ConfigParser.detect_format(line0),
+                                                                   item_type)
+            if item_type == RSyslogHelper.ConfigParser.TYPE_FILE:
+                for sub_item in new_item.get():
+                    config_item.add_item(sub_item)
+            else:
+                config_item.add_item(new_item.get())
+
+            self.parsed_conf.insert(ins_index, config_item)
+
+        def get_check_item_by_name(self, name, item_type):
+            for item in self.parsed_conf:
+                if item.get_type() == item_type:
+                    if item_type == RSyslogHelper.ConfigParser.TYPE_POLLING_INTERVAL:
+                        return item
+                    else:
+                        if not item.get(name) is None:
+                            return item
+            return None
+
+        @staticmethod
+        def is_comment(line):
+            return line.startswith('#')
+
+        @staticmethod
+        def detect_format(line):
+            if line.startswith('$'):
+                return RSyslogHelper.ConfigParser.CONF_OLD_FORMAT
+            return RSyslogHelper.ConfigParser.CONF_NEW_FORMAT
+
+    class RsyslogLogMsgTemplate:
+
+        RSYSLOG_TEMPLATE_MSG_FORMAT = '%HOSTNAME%: %msg%\\n'
+
+        def __init__(self, name, token):
+            self.name = 'format_' + name
+            self.token = token
+
+        def get(self):
+            template = '$template %s, \"%s %s\"\n' % (self.name, self.token,
+                                                      RSyslogHelper.RsyslogLogMsgTemplate.RSYSLOG_TEMPLATE_MSG_FORMAT)
+            return template
+
+        def get_type(self):
+            return RSyslogHelper.ConfigParser.TYPE_TEMPLATE
+
+        def equals(self, template):
+            if not template is None:
+                return self.name == template.name and self.token == template.token
+            return False
+
+    class ModLoadTemplate:
+
+        def __init__(self, name):
+            self.name = name
+
+        def get_type(self):
+            return RSyslogHelper.ConfigParser.TYPE_MODLOAD
+
+        def get(self):
+            return '$ModLoad ' + self.name + '\n'
+
+    class PollingIntervalTemplate:
+
+        def __init__(self, interval):
+            self.interval = interval
+
+        def get_type(self):
+            return RSyslogHelper.ConfigParser.TYPE_POLLING_INTERVAL
+
+        def get(self):
+            return '$InputFilePollInterval ' + str(self.interval) + '\n'
+
+    class RoutingRuleTemplate:
+
+        def __init__(self, rule_name, template_name, domain, port):
+            self.rule_name = rule_name
+            self.template_name = template_name
+            self.domain = domain
+            self.port = port
+
+        def get_type(self):
+            return RSyslogHelper.ConfigParser.TYPE_ROUTING_RULE
+
+        def get(self):
+            return 'if $programname == \'' + self.rule_name + '\' then @@' + self.domain + ':' + self.port + ';' + \
+                   self.template_name + '\n'
+
+    class RsyslogFollowedFileTemplate:
+
+        def __init__(self, filepath, token, severity, facility):
+            self.filepath = filepath
+            self.token = token
+            self.severity = severity
+            self.facility = facility
+
+            numeric_part = RSyslogHelper.get_hash_for_file_path(self.filepath)
+            if numeric_part is None:
+                die('Cannot compute hash for file: ' + self.filepath)
+
+            self.tag = 'tag_' + numeric_part
+            self.state_file = 'stat_' + self.tag
+
+        def equals(self, template):
+            if not template is None:
+                return self.filepath == template.filepath
+            return False
+
+        def get_type(self):
+            return RSyslogHelper.ConfigParser.TYPE_FILE
+
+        def get(self, is_legacy=True):
+            file_item = list()
+            if is_legacy:
+                file_item.append('$InputFileName ' + self.filepath + '\n')
+                file_item.append('$InputFileTag ' + self.tag + '\n')
+                file_item.append(
+                    '$InputFileStateFile ' + self.state_file + '\n')
+                file_item.append('$InputFileSeverity ' + self.severity + '\n')
+                file_item.append('$InputFileFacility ' + self.facility + '\n')
+                file_item.append('$InputRunFileMonitor\n')
+                file_item.append('\n')  # File items delimiter
+                return file_item
+            else:
+                die('Modern config notation support is not implemented yet!')
+
+    def __init__(self, conf_file):
+        self.rsyslog_conf = None  # Config buffer
+        self.load_conf()
+        self.parser = RSyslogHelper.ConfigParser(self.rsyslog_conf)
+
+    def load_conf(self):
+        if not RSyslogHelper.is_rsyslog_conf_present():
+            die('Cannot locate rsyslog.conf (search path was: ' + RSYSLOG_CONF_FILE + '). Either the config was deleted or rsyslog daemon' +
+                'is not installed.')
+        try:
+            raw_config = open(RSYSLOG_CONF_FILE, 'r')
+            self.rsyslog_conf = raw_config.readlines()
+        except IOError as e:
+            report('Cannot load contents of ' + RSYSLOG_CONF_FILE)
+            die(e)
+
+    def save_conf(self):
+        if not RSyslogHelper.is_rsyslog_conf_present():
+            die('Cannot locate rsyslog.conf (search path was: %s). Maybe the config was deleted.' %
+                RSYSLOG_CONF_FILE)
+        try:
+            raw_conf = open(RSYSLOG_CONF_FILE, 'wb+')
+            serialized = self.parser.serialize()
+            raw_conf.write(serialized)
+        except IOError as e:
+            report('Cannot save config buffer to %s:' % RSYSLOG_CONF_FILE)
+            die(e)
+
+    @staticmethod
+    def get_hash_for_file_path(filepath):
+        try:
+            if not filepath is None:
+                return hashlib.sha1(filepath).hexdigest()
+        except:
+            pass
+        return None
+
+    @staticmethod
+    def is_rsyslog_conf_present():
+        return os.path.exists(RSYSLOG_CONF_FILE) and os.path.isfile(RSYSLOG_CONF_FILE)
+
+
+# ------------ Entry point of lersyslog application --------
+# Start logging
+log = logging.getLogger(LOG_LE_RSYSLOG)
+if not log:
+    report(LOGGER_OBTAINING_ERROR)
+    sys.exit(EXIT_ERR)
+log.setLevel(logging.INFO)
+stream_handler = logging.StreamHandler()
+stream_handler.setLevel(logging.DEBUG)
+stream_handler.setFormatter(logging.Formatter("%(message)s"))
+log.addHandler(stream_handler)
+
+# Check if the app is invoked by sudo
+if os.geteuid() != 0:
+    die(PRIVILEGES_ERROR)
+
+config = Config()
+# Check imports...
+try:
+    import json
+
+    try:
+        json_loads = json.loads
+        json_dumps = json.dumps
+    except AttributeError:
+        json_loads = json.read
+        json_dumps = json.write
+except ImportError:
+    try:
+        import simplejson
+    except ImportError:
+        die('NOTE: Please install Python "simplejson" package (python-simplejson) or a newer Python (2.6+).')
+    json_loads = simplejson.loads
+    json_dumps = simplejson.dumps
+
+try:
+    import ssl
+
+    config.use_ssl = True
+except ImportError:
+    try:
+        x = httplib.HTTPSConnection
+    except AttributeError:
+        die('NOTE: Please install Python "ssl" module.')
+
+
+def main():
+    # Get params from the command line, set config internal state
+    # and return commands
+    args = config.process_parameters(sys.argv[1:])
+
+    if config.debug:
+        log.setLevel(logging.DEBUG)
+        log.debug('[DEBUG]: Starting application...')
+
+    argv0 = sys.argv[0]
+    if argv0 and argv0 != '':
+        pname = os.path.basename(argv0).split('-')
+        if len(pname) != 1:
+            args.insert(0, pname[-1])
+
+    if len(args) == 0:
+        report(USAGE_HELP_MESSAGE)
+        sys.exit(EXIT_OK)
+
+    commands = {
+        'register': Worker.cmd_register,
+        'help': Worker.cmd_help,
+        'follow': Worker.cmd_follow
+    }
+
+    for cmd, func in commands.items():
+        if cmd == args[0]:
+            return func(args[1:])
+    die('Error: Unknown command "%s".' % args[0])
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        log.info(APP_INTERRUPTED_MSG)
