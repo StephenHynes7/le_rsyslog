@@ -988,6 +988,21 @@ class Worker:
         pass
 
     @staticmethod
+    def write_rsyslog_conf(helper, filepath, token):
+        if filepath and token:
+            file_item = RSyslogHelper.RsyslogFollowedFileTemplate(
+                filepath, token, 'info', 'local7')
+            template = RSyslogHelper.RsyslogLogMsgTemplate(
+                file_item.tag, file_item.token)
+            routing_rule = RSyslogHelper.RoutingRuleTemplate(file_item.tag, template.name, API.Domain.DATA,
+                                                             str(API.Domain.NON_SSL_PORT))
+            helper.parser.add_item(file_item)
+            helper.parser.add_item(template)
+            helper.parser.add_item(routing_rule)
+        else:
+            raise 'Detected missing filepath or token while trying to write to rsyslog.conf'
+
+    @staticmethod
     def cmd_register(args):
 
         if config.host_key == '' or config.force or config.account_key_cmd_line_param:
@@ -1096,15 +1111,7 @@ class Worker:
                         token = current_log['token']
 
                 if not need_to_do_request_only:
-                    file_item = RSyslogHelper.RsyslogFollowedFileTemplate(
-                        filename, token, 'info', 'local7')
-                    template = RSyslogHelper.RsyslogLogMsgTemplate(
-                        file_item.tag, file_item.token)
-                    routing_rule = RSyslogHelper.RoutingRuleTemplate(file_item.tag, template.name, API.Domain.DATA,
-                                                                     str(API.Domain.NON_SSL_PORT))
-                    helper.parser.add_item(file_item)
-                    helper.parser.add_item(template)
-                    helper.parser.add_item(routing_rule)
+                    Worker.write_rsyslog_conf(helper, filename, token)
 
                 report('Success! Token: ' + token)
 
@@ -1118,6 +1125,49 @@ class Worker:
 
         helper.save_conf()
         report('Config successfully saved to %s' % RSYSLOG_CONF_FILE)
+
+    @staticmethod
+    def cmd_import(args):
+        try:
+            file_path = args[0]
+        except Exception as e:
+            raise 'Error while accessing JSON file, %s', e
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            try:
+                json_config_file = open(file_path)
+                json_config_data = json.load(json_config_file)
+                json_config_file.close()
+                helper = RSyslogHelper(RSYSLOG_CONF_FILE)
+                helper.parser.parse()
+                # Prints parsed object if debug switch is set to True
+                helper.parser.print_parsed_conf()
+
+                #Iterate through the logs and create the rsyslog conf entry for it.
+                for log in json_config_data['logs']:
+                    try:
+                        token = log['token']
+                        filepath = log['path']
+                        item = helper.parser.get_check_item_by_name(
+                            filepath, RSyslogHelper.ConfigParser.TYPE_FILE)
+                        if item is None:
+                            Worker.write_rsyslog_conf(helper, filepath, token)
+                    except KeyError as e:
+                        raise 'Could not access JSON value, %s', e
+                interval = helper.parser.get_check_item_by_name(
+                    '', RSyslogHelper.ConfigParser.TYPE_POLLING_INTERVAL)
+                if interval is None:
+                    new_interval = RSyslogHelper.PollingIntervalTemplate(
+                        1)  # By default
+                    helper.parser.add_item(new_interval)
+                helper.save_conf()
+                report('Config successfully saved to %s' % RSYSLOG_CONF_FILE)
+            except IOError as e:
+                raise 'Could not read file, %s', e
+            except ValueError as e:
+                raise 'Could not parse JSON, %s', e
+
+        else:
+            raise 'File %s, does not exist', file_path
 
 
 class UserInterface:
@@ -1432,7 +1482,7 @@ class RSyslogHelper:
 
     class RsyslogLogMsgTemplate:
 
-        RSYSLOG_TEMPLATE_MSG_FORMAT = '%HOSTNAME%: %msg%\\n'
+        RSYSLOG_TEMPLATE_MSG_FORMAT = 'Hostname:%HOSTNAME% : %msg%\\n'
 
         def __init__(self, name, token):
             self.name = 'format_' + name
@@ -1636,7 +1686,8 @@ def main():
     commands = {
         'register': Worker.cmd_register,
         'help': Worker.cmd_help,
-        'follow': Worker.cmd_follow
+        'follow': Worker.cmd_follow,
+        'import': Worker.cmd_import
     }
 
     for cmd, func in commands.items():
