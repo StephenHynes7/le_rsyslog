@@ -2,8 +2,6 @@ le_rsyslog
 ==========
 le_rsyslog is a Python tool which quickly allows you to configure your Rsyslog without needing to edit any configuration files
 
-Logentries lersyslog version 1.0.9
-Usage: lersyslog COMMAND [ARGS]
 
 ```python
 Where command is one of:
