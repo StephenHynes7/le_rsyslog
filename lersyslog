@@ -1130,7 +1130,7 @@ class Worker:
             '', RSyslogHelper.ConfigParser.TYPE_POLLING_INTERVAL)
         if interval is None:
             new_interval = RSyslogHelper.PollingIntervalTemplate(
-                1)  # By default
+                10)  # By default
             helper.parser.add_item(new_interval)
 
         helper.save_conf()
