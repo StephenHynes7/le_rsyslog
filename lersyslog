@@ -1164,7 +1164,7 @@ class Worker:
                         if item is None:
                             Worker.write_rsyslog_conf(helper, filepath, token)
                             report(
-                                'Now following the file %s ' % file_path)
+                                'Now following the file %s ' % filepath)
                         else:
                             report(
                                 'File ' + filepath + ' is already being followed.')
