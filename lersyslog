@@ -1053,6 +1053,15 @@ class Worker:
         report(USAGE_HELP_MESSAGE)
 
     @staticmethod
+    def add_mod_imfile(helper, RsyslogHelper):
+        # Isert imfile module if it is not already there
+        mod_imfile = helper.parser.get_check_item_by_name(
+                'imfile', RSyslogHelper.ConfigParser.TYPE_MODLOAD)
+        if mod_imfile is None:
+            mod_imfile = RSyslogHelper.ModLoadTemplate('imfile')
+            helper.parser.add_item(mod_imfile)
+
+    @staticmethod
     def cmd_follow(args):
 
         if config.host_key == '' or config.account_key == '':
@@ -1068,11 +1077,12 @@ class Worker:
         helper.parser.print_parsed_conf()
 
         # Isert imfile module if it is not already there
-        mod_imfile = helper.parser.get_check_item_by_name(
-            'imfile', RSyslogHelper.ConfigParser.TYPE_MODLOAD)
-        if mod_imfile is None:
-            mod_imfile = RSyslogHelper.ModLoadTemplate('imfile')
-            helper.parser.add_item(mod_imfile)
+        Worker.add_mod_imfile(helper, RSyslogHelper)
+        # mod_imfile = helper.parser.get_check_item_by_name(
+        #     'imfile', RSyslogHelper.ConfigParser.TYPE_MODLOAD)
+        # if mod_imfile is None:
+        #     mod_imfile = RSyslogHelper.ModLoadTemplate('imfile')
+        #     helper.parser.add_item(mod_imfile)
 
         logs = API.get_followed_logs()
 
@@ -1141,6 +1151,7 @@ class Worker:
                 helper.parser.parse()
                 # Prints parsed object if debug switch is set to True
                 helper.parser.print_parsed_conf()
+                Worker.add_mod_imfile(helper, RSyslogHelper)
 
                 # Iterate through the logs and create the rsyslog conf entry
                 # for it.
