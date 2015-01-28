@@ -70,3 +70,9 @@ The JSON configuration file requires the following format to be present
 Where LOG_TOKEN_ONE and LOG_TOKEN_TWO are [Log Tokens](https://logentries.com/doc/input-token/) that were created in Logentries.
 
 Using this configuration file your Rsyslog will be configured to follow each file and use the associated Token when sending to Logentries.
+
+Now you can run
+```
+sudo python lersyslog import FILE_PATH
+```
+
