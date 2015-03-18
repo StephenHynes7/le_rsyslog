@@ -76,3 +76,10 @@ Now you can run
 sudo python lersyslog import FILE_PATH
 ```
 
+Running le_rsyslog on Python2.6
+---
+On Python2.6, `le_rsyslog` requires `ordereddict`:
+
+```
+sudo pip install ordereddict
+```
