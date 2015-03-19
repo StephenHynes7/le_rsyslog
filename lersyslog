@@ -20,7 +20,10 @@ import urllib
 
 # ------------------- Constants section --------------------
 # Application version
-import collections
+try:
+    from collections import OrderedDict
+except ImportError:
+    from ordereddict import OrderedDict
 
 LE_LERSYSLOG_NAME = 'lersyslog'
 # This value should be replaced by version generator
@@ -1330,7 +1333,7 @@ class RSyslogHelper:
             def __init__(self, format, type):
                 self.format = format
                 self.type = type
-                self.items = collections.OrderedDict()
+                self.items = OrderedDict()
                 self.other_items_count = 0
                 self.polling_items_count = 0
                 self.routing_rules_general = 0
