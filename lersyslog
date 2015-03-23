@@ -592,7 +592,7 @@ class API:
         LE_SERVER_API = '/'
         # Account-related addresses
         ACCOUNT_KEYS_API = 'https://logentries.com/agent/account-keys/'
-        NON_SSL_PORT = 10000
+        NON_SSL_PORT = 80
 
     @staticmethod
     def api_request(request, required=False, check_status=False, silent=False, die_on_error=True, method='POST'):
