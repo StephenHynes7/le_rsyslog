@@ -1025,6 +1025,7 @@ class Worker:
                         API.request_host_registration()
                     report('Registered with account key = %s \nand host key = %s' % (config.account_key,
                                                                                      config.host_key))
+                    config.save()
                     return
 
                 # Get user's e-mail and password
